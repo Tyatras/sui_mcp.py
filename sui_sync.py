@@ -5,9 +5,9 @@ from datetime import datetime
 import time
 import json
 
-DEBUG = True  # 🔁 Toggle to False to silence logs
+DEBUG = True  # Set to False to reduce logs
 
-# Google Sheets setup
+# Setup Google Sheets
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
@@ -17,7 +17,7 @@ config_ws = spreadsheet.worksheet("Config")
 output_ws = spreadsheet.worksheet("Transactions")
 wallet_address = config_ws.acell("B1").value.strip()
 
-existing_hashes = set(output_ws.col_values(3)[1:])  # Skip header
+existing_hashes = set(output_ws.col_values(3)[1:])  # Column C: Txn Hash
 
 rpc_url = "https://fullnode.mainnet.sui.io"
 cursor = None
@@ -25,7 +25,7 @@ page_size = 50
 has_next_page = True
 rows_to_append = []
 
-print(f"🔄 Starting sync for: {wallet_address}")
+print(f"🔍 Syncing transactions for: {wallet_address}")
 
 while has_next_page:
     payload = {
@@ -58,30 +58,30 @@ while has_next_page:
     has_next_page = result.get("hasNextPage", False)
 
     if DEBUG:
-        print(f"🧭 Got {len(txns)} txns | nextCursor: {cursor} | hasNext: {has_next_page}")
+        print(f"🧭 Retrieved {len(txns)} txns | nextCursor: {cursor} | hasNext: {has_next_page}")
 
     for txn in txns:
         digest = txn.get("digest")
         if digest in existing_hashes:
             continue
 
-        # Timestamp
+        # === TIMESTAMP ===
         timestamp = txn.get("timestampMs")
         ts_fmt = datetime.utcfromtimestamp(int(timestamp) / 1000).strftime("%Y-%m-%d %H:%M:%S") if timestamp else ""
 
         # === FEE ===
         fee = "0"
         try:
-            total_gas_used = txn.get("effects", {}).get("gasUsed", {}).get("totalGasUsed", 0)
-            fee = f"{float(total_gas_used) / 1e9:.9f}"
+            gas = txn.get("effects", {}).get("gasUsed", {})
+            total_mist = int(gas.get("computationCost", 0)) + int(gas.get("storageCost", 0)) - int(gas.get("storageRebate", 0))
+            fee = f"{total_mist / 1e9:.9f}"
         except Exception as e:
             if DEBUG:
-                print(f"⚠️ Fee parse fail [{digest}]: {e}")
+                print(f"⚠️ Fee parse error [{digest}]: {e}")
 
-        # === AMOUNT & DIRECTION ===
+        # === AMOUNT + DIRECTION ===
         amount = ""
         direction = ""
-
         try:
             events = txn.get("events", [])
             if DEBUG:
@@ -89,9 +89,7 @@ while has_next_page:
 
             for event in events:
                 if "moveEvent" in event:
-                    move = event["moveEvent"]
-                    fields = move.get("fields", {})
-
+                    fields = event["moveEvent"].get("fields", {})
                     amt_raw = fields.get("amount")
                     sender = fields.get("sender")
                     recipient = fields.get("recipient")
@@ -100,8 +98,7 @@ while has_next_page:
                         amount = f"{int(amt_raw) / 1e9:.9f}"
                     if sender and recipient:
                         direction = "OUT" if sender == wallet_address else "IN"
-                    break
-
+                    break  # Stop after first successful parse
         except Exception as e:
             if DEBUG:
                 print(f"❌ Event parse fail [{digest}]: {e}")
@@ -118,14 +115,14 @@ while has_next_page:
         ]
         rows_to_append.append(row)
 
-    time.sleep(0.5)
+    time.sleep(0.5)  # Respect rate limits
 
-# Upload
+# === WRITE TO SHEET ===
 if rows_to_append:
-    print(f"⬆️ Appending {len(rows_to_append)} rows...")
+    print(f"⬆️ Appending {len(rows_to_append)} new rows...")
     for row in reversed(rows_to_append):
         output_ws.append_row(row)
 else:
-    print("✅ No new rows found")
+    print("✅ No new transactions found.")
 
 print("🎯 Sync complete.")
