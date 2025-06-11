@@ -4,28 +4,28 @@ import requests
 from datetime import datetime
 import time
 
-# Google Sheets setup
+# Authenticate with Google Sheets
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 
-# Open your Google Sheet and get wallet from Config tab
+# Access workbook
 spreadsheet = client.open("SUI_Transactions")
 config_ws = spreadsheet.worksheet("Config")
 output_ws = spreadsheet.worksheet("Transactions")
 wallet_address = config_ws.acell("B1").value.strip()
 
-# Load all existing hashes to avoid duplicates
-existing_hashes = set(output_ws.col_values(3)[1:])  # Skip header
+print(f"📡 Syncing transactions for wallet: {wallet_address}")
 
-# SUI RPC setup
+# Avoid duplicates by reading existing Txn Hash column
+existing_hashes = set(output_ws.col_values(3)[1:])  # Skip header row
+
+# RPC config
 rpc_url = "https://fullnode.mainnet.sui.io"
 cursor = None
 page_size = 50
 has_next_page = True
 new_rows = []
-
-print(f"Syncing transactions for: {wallet_address}")
 
 while has_next_page:
     payload = {
@@ -54,64 +54,70 @@ while has_next_page:
     response = requests.post(rpc_url, json=payload)
     result = response.json().get("result", {})
     txns = result.get("data", [])
-    cursor = result.get("nextCursor", None)
+    cursor = result.get("nextCursor")
     has_next_page = result.get("hasNextPage", False)
 
     for txn in txns:
         digest = txn.get("digest")
         if digest in existing_hashes:
-            continue
+            continue  # Already processed
 
-        # Timestamp (convert from ms to UTC)
-        timestamp_ms = txn.get("timestampMs")
-        timestamp = datetime.utcfromtimestamp(int(timestamp_ms)/1000).strftime("%Y-%m-%d %H:%M:%S") if timestamp_ms else ""
+        timestamp = txn.get("timestampMs")
+        ts_fmt = datetime.utcfromtimestamp(int(timestamp) / 1000).strftime("%Y-%m-%d %H:%M:%S") if timestamp else ""
 
-        # Fee (convert from Mist to SUI)
-        gas_info = txn.get("effects", {}).get("gasUsed", {})
-        fee_sui = float(gas_info.get("totalGasUsed", 0)) / 1e9
+        # Fee
+        fee = "0"
+        try:
+            total_gas_used = txn.get("effects", {}).get("gasUsed", {}).get("totalGasUsed", 0)
+            fee = f"{float(total_gas_used) / 1e9:.9f}"
+        except Exception as e:
+            print(f"⚠️ Fee parse error for {digest}: {e}")
 
-        # Default placeholders
+        # Defaults
+        amount = ""
         direction = ""
-        amount_sui = 0
 
-        # Event inspection
+        # Events
         events = txn.get("events", [])
         for event in events:
-            if "TransferObject" in event:
-                obj = event["TransferObject"]
-                sender = obj.get("sender", "")
-                recipient = obj.get("recipient", "")
+            if "Pay" in event:
+                pay = event["Pay"]
+                try:
+                    amounts = pay.get("amounts", [])
+                    total_amount = sum([int(a) for a in amounts]) / 1e9
+                    amount = f"{total_amount:.9f}"
+                    direction = "OUT"
+                except:
+                    pass
+                break
+            elif "TransferObject" in event:
+                details = event["TransferObject"]
+                sender = details.get("sender", "")
+                recipient = details.get("recipient", "")
                 direction = "OUT" if sender == wallet_address else "IN"
                 break
-            elif "Pay" in event:
-                pay = event["Pay"]
-                recipients = pay.get("recipients", [])
-                amounts = pay.get("amounts", [])
-                total_mist = sum([int(a) for a in amounts])
-                amount_sui = total_mist / 1e9
-                direction = "OUT"
-                break
 
-        # Only convert amount if it's been found
-        amount_str = f"{amount_sui:.9f}" if amount_sui > 0 else ""
+        print(f"✔️ {ts_fmt} | {digest} | Amount: {amount} | Fee: {fee} | Direction: {direction}")
 
         row = [
-            timestamp,
+            ts_fmt,
             wallet_address,
             digest,
             "SUI",
-            amount_str,
-            f"{fee_sui:.9f}",
+            amount,
+            fee,
             direction
         ]
         new_rows.append(row)
 
-    time.sleep(0.5)  # prevent rate limits
+    time.sleep(0.5)  # Prevent rate limits
 
-print(f"Appending {len(new_rows)} new transactions...")
+# Append rows
+if new_rows:
+    print(f"🚀 Appending {len(new_rows)} new transactions...")
+    for row in reversed(new_rows):
+        output_ws.append_row(row)
+else:
+    print("✅ No new transactions to append.")
 
-# Append in reverse chronological order
-for row in reversed(new_rows):
-    output_ws.append_row(row)
-
-print("✅ Sync complete.")
+print("🎯 Sync complete.")
