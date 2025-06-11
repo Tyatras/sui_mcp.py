@@ -1,19 +1,22 @@
 import gspread
 from google.oauth2.service_account import Credentials
 import requests
+from datetime import datetime
 
-# Setup Google Sheets credentials
+# Google Auth
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 
-# Open the sheet
-sheet = client.open("SUI_Transactions").sheet1
+# Open spreadsheet and worksheets
+spreadsheet = client.open("SUI_Transactions")
+config_ws = spreadsheet.worksheet("Config")
+output_ws = spreadsheet.worksheet("Transactions")
 
-# Example wallet address (replace later with data from the sheet)
-wallet_address = "0xabc123..."
+# Get wallet address from cell B1 in Config tab
+wallet_address = config_ws.acell("B1").value
 
-# Query the SUI blockchain
+# Query SUI blockchain
 response = requests.post("https://fullnode.mainnet.sui.io", json={
     "jsonrpc": "2.0",
     "method": "sui_getTransactions",
@@ -23,8 +26,14 @@ response = requests.post("https://fullnode.mainnet.sui.io", json={
 
 txns = response.json().get("result", [])
 
-# Append results to the sheet
-for txn in txns[:5]:
-    sheet.append_row(["", wallet_address, txn.get("digest", "n/a"), "SUI", "", "", ""])
+# Write transactions to the Transactions tab
+for txn in txns[:5]:  # limit to 5 for demo
+    row = [
+        datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        wallet_address,
+        txn.get("digest", "n/a"),
+        "SUI", "", "", ""
+    ]
+    output_ws.append_row(row)
 
-print(f"Synced {len(txns)} transactions")
+print(f"Synced {len(txns)} transactions for wallet {wallet_address}")
