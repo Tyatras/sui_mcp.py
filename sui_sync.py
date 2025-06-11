@@ -4,7 +4,7 @@ import requests
 from datetime import datetime
 import time
 
-DEBUG = True
+DEBUG = True  # Turn off in production
 
 # Setup Google Sheets
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -14,7 +14,7 @@ client = gspread.authorize(creds)
 spreadsheet = client.open("SUI_Transactions")
 config_ws = spreadsheet.worksheet("Config")
 output_ws = spreadsheet.worksheet("Transactions")
-wallet_address = config_ws.acell("B1").value.strip()
+wallet_address = config_ws.acell("B1").value.strip().lower()
 
 existing_hashes = set(output_ws.col_values(3)[1:])  # Skip header
 rpc_url = "https://fullnode.mainnet.sui.io"
@@ -82,13 +82,22 @@ while has_next_page:
             coin_type = change.get("coinType", "")
             amount_raw = change.get("amount")
 
-            if not (wallet_address in owner and amount_raw):
+            # Handle dict or direct owner value
+            if isinstance(owner, dict):
+                owner_str = list(owner.values())[0]
+            else:
+                owner_str = owner
+
+            if DEBUG:
+                print(f"🔎 Checking change: owner={owner_str}, amount={amount_raw}, token={coin_type}")
+
+            if not (owner_str and owner_str.lower() == wallet_address and amount_raw):
                 continue
 
-            # Convert token type
+            # Extract token name
             token_symbol = "SUI" if coin_type.endswith("::sui::SUI") else coin_type.split("::")[-1]
 
-            # Calculate direction and amount
+            # Direction + amount
             direction = "IN" if int(amount_raw) > 0 else "OUT"
             amount = f"{abs(int(amount_raw)) / 1e9:.9f}"
 
