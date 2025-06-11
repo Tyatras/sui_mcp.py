@@ -3,26 +3,26 @@ name: SUI Sync
 on:
   schedule:
     - cron: "0 * * * *"  # Every hour
-  workflow_dispatch:     # Allows manual runs
+  workflow_dispatch:     # Allows manual run from GitHub UI
 
 jobs:
   sync:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.10"
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
 
-    - name: Install dependencies
-      run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-- name: Decode service account file
-  run: echo "${{ secrets.SERVICE_ACCOUNT_JSON_BASE64 }}" | base64 --decode > service_account.json
+      - name: Decode service account file
+        run: echo "${{ secrets.SERVICE_ACCOUNT_JSON_BASE64 }}" | base64 --decode > service_account.json
 
-    - name: Run sync script
-      run: python sui_sync.py
+      - name: Run sync script
+        run: python sui_sync.py
