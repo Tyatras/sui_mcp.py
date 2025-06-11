@@ -4,7 +4,7 @@ import requests
 from datetime import datetime
 import time
 
-DEBUG = True  # Set to False in production
+DEBUG = True  # Turn off when running live
 
 # Setup Google Sheets
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -33,7 +33,7 @@ while has_next_page:
         "params": [
             {
                 "filter": {
-                    "All": []
+                    "FromAddress": wallet_address  # 🔥 Correct filter here
                 },
                 "options": {
                     "showInput": True,
@@ -82,20 +82,20 @@ while has_next_page:
             coin_type = change.get("coinType", "")
             amount_raw = change.get("amount")
 
-            # Handle owner field format (dict or string)
+            # Handle dict or string owner field
             if isinstance(owner, dict):
                 owner_str = list(owner.values())[0]
             else:
                 owner_str = owner
 
-            # DEBUG: Show balance change evaluation
+            # Debug check for owner match
             if DEBUG:
                 print(f"🧩 digest={digest} | owner={owner_str} | wallet={wallet_address} | match={wallet_address in owner_str.lower()} | amt={amount_raw}")
 
-            # Match based on lowercase address presence
             if not (owner_str and wallet_address in owner_str.lower() and amount_raw):
                 continue
 
+            # Token symbol logic
             token_symbol = "SUI" if coin_type.endswith("::sui::SUI") else coin_type.split("::")[-1]
             direction = "IN" if int(amount_raw) > 0 else "OUT"
             amount = f"{abs(int(amount_raw)) / 1e9:.9f}"
