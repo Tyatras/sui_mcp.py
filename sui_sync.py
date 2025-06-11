@@ -4,34 +4,28 @@ import requests
 from datetime import datetime
 import time
 
-# Google Sheets authentication
+# Google Sheets setup
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 
-# Open the spreadsheet and sheets
+# Open your Google Sheet and get wallet from Config tab
 spreadsheet = client.open("SUI_Transactions")
 config_ws = spreadsheet.worksheet("Config")
 output_ws = spreadsheet.worksheet("Transactions")
+wallet_address = config_ws.acell("B1").value.strip()
 
-# Get wallet address from Config sheet
-wallet_address = config_ws.acell("B1").value
-print("Wallet address:", wallet_address)
-
-# Fetch all existing txn hashes in sheet to avoid duplicates
-existing_hashes = set()
-existing_data = output_ws.col_values(3)  # Column C: Txn Hash
-for digest in existing_data[1:]:  # Skip header
-    existing_hashes.add(digest)
+# Load all existing hashes to avoid duplicates
+existing_hashes = set(output_ws.col_values(3)[1:])  # Skip header
 
 # SUI RPC setup
 rpc_url = "https://fullnode.mainnet.sui.io"
 cursor = None
-all_new_txns = []
 page_size = 50
 has_next_page = True
+new_rows = []
 
-print("Fetching transaction history...")
+print(f"Syncing transactions for: {wallet_address}")
 
 while has_next_page:
     payload = {
@@ -58,69 +52,66 @@ while has_next_page:
     }
 
     response = requests.post(rpc_url, json=payload)
-    data = response.json().get("result", {})
-    txns = data.get("data", [])
-    cursor = data.get("nextCursor", None)
-    has_next_page = data.get("hasNextPage", False)
-
-    print(f"Retrieved {len(txns)} txns (nextCursor: {cursor})")
+    result = response.json().get("result", {})
+    txns = result.get("data", [])
+    cursor = result.get("nextCursor", None)
+    has_next_page = result.get("hasNextPage", False)
 
     for txn in txns:
         digest = txn.get("digest")
         if digest in existing_hashes:
-            continue  # Skip if already in sheet
+            continue
 
-        # Timestamp
+        # Timestamp (convert from ms to UTC)
         timestamp_ms = txn.get("timestampMs")
-        txn_time = datetime.utcfromtimestamp(int(timestamp_ms)/1000).strftime("%Y-%m-%d %H:%M:%S") if timestamp_ms else "N/A"
+        timestamp = datetime.utcfromtimestamp(int(timestamp_ms)/1000).strftime("%Y-%m-%d %H:%M:%S") if timestamp_ms else ""
 
         # Fee (convert from Mist to SUI)
-        fee_mist = txn.get("effects", {}).get("gasUsed", {}).get("computationCost", 0)
-        fee_sui = str(int(fee_mist) / 1e9)
+        gas_info = txn.get("effects", {}).get("gasUsed", {})
+        fee_sui = float(gas_info.get("totalGasUsed", 0)) / 1e9
 
-        # Default values
-        amount = ""
+        # Default placeholders
         direction = ""
+        amount_sui = 0
 
-        # Detect amount + direction from events
+        # Event inspection
         events = txn.get("events", [])
         for event in events:
             if "TransferObject" in event:
-                details = event["TransferObject"]
-                recipient = details.get("recipient", "")
-                sender = details.get("sender", "")
+                obj = event["TransferObject"]
+                sender = obj.get("sender", "")
+                recipient = obj.get("recipient", "")
                 direction = "OUT" if sender == wallet_address else "IN"
                 break
             elif "Pay" in event:
-                details = event["Pay"]
-                recipient_list = details.get("recipients", [])
-                amounts = details.get("amounts", [])
-                total = sum([int(a) for a in amounts]) / 1e9
-                amount = str(total)
-                direction = "OUT" if wallet_address in details.get("inputCoins", []) else "IN"
+                pay = event["Pay"]
+                recipients = pay.get("recipients", [])
+                amounts = pay.get("amounts", [])
+                total_mist = sum([int(a) for a in amounts])
+                amount_sui = total_mist / 1e9
+                direction = "OUT"
                 break
 
-        # Row format
+        # Only convert amount if it's been found
+        amount_str = f"{amount_sui:.9f}" if amount_sui > 0 else ""
+
         row = [
-            txn_time,
+            timestamp,
             wallet_address,
             digest,
             "SUI",
-            amount,
-            fee_sui,
+            amount_str,
+            f"{fee_sui:.9f}",
             direction
         ]
-        all_new_txns.append(row)
+        new_rows.append(row)
 
-    # Optional: throttle requests to avoid rate limiting
-    time.sleep(0.5)
+    time.sleep(0.5)  # prevent rate limits
 
-# Append new transactions
-if all_new_txns:
-    print(f"Appending {len(all_new_txns)} new transactions...")
-    for row in reversed(all_new_txns):  # Oldest first
-        output_ws.append_row(row)
-else:
-    print("No new transactions to append.")
+print(f"Appending {len(new_rows)} new transactions...")
 
-print("✅ Full sync complete.")
+# Append in reverse chronological order
+for row in reversed(new_rows):
+    output_ws.append_row(row)
+
+print("✅ Sync complete.")
