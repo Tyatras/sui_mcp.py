@@ -3,9 +3,8 @@ from google.oauth2.service_account import Credentials
 import requests
 from datetime import datetime
 import time
-import json
 
-DEBUG = True  # Set to False in production
+DEBUG = True
 
 # Setup Google Sheets
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -34,7 +33,7 @@ while has_next_page:
         "params": [
             {
                 "filter": {
-                    "FromAddress": wallet_address
+                    "All": []
                 },
                 "options": {
                     "showInput": True,
@@ -70,72 +69,43 @@ while has_next_page:
         # === FEE ===
         fee = "0"
         try:
-            gas = txn.get("effects", {}).get("gasUsed", {})
-            total_mist = int(gas.get("computationCost", 0)) + int(gas.get("storageCost", 0)) - int(gas.get("storageRebate", 0))
-            fee = f"{total_mist / 1e9:.9f}"
+            gas_used = txn.get("effects", {}).get("gasUsed", {}).get("totalGasUsed", 0)
+            fee = f"{int(gas_used) / 1e9:.9f}"
         except Exception as e:
             if DEBUG:
                 print(f"⚠️ Gas parse fail [{digest}]: {e}")
 
-        # === AMOUNT & DIRECTION ===
-        amount = ""
-        direction = ""
-        matched = False
-        try:
-            for event in txn.get("events", []):
-                if "moveEvent" not in event:
-                    continue
+        # === BALANCE CHANGES ===
+        changes = txn.get("balanceChanges", [])
+        for change in changes:
+            owner = change.get("owner", "")
+            coin_type = change.get("coinType", "")
+            amount_raw = change.get("amount")
 
-                move = event["moveEvent"]
-                evt_type = move.get("type", "")
-                fields = move.get("fields", {})
+            if not (wallet_address in owner and amount_raw):
+                continue
 
-                # Match based on known token transfer types
-                if "Pay" in evt_type or "TransferObject" in evt_type:
-                    amt_raw = fields.get("amount")
-                    sender = fields.get("sender")
-                    recipient = fields.get("recipient")
+            # Convert token type
+            token_symbol = "SUI" if coin_type.endswith("::sui::SUI") else coin_type.split("::")[-1]
 
-                    if amt_raw:
-                        amount = f"{int(amt_raw) / 1e9:.9f}"
-                    if sender and recipient:
-                        direction = "OUT" if sender == wallet_address else "IN"
-                    matched = True
-                    break
+            # Calculate direction and amount
+            direction = "IN" if int(amount_raw) > 0 else "OUT"
+            amount = f"{abs(int(amount_raw)) / 1e9:.9f}"
 
-            if not matched:
-                if DEBUG:
-                    print(f"🔍 No matching moveEvent found for {digest}, checking balanceChanges")
-                for change in txn.get("balanceChanges", []):
-                    owner = change.get("owner", "")
-                    amt = change.get("amount")
-                    coinType = change.get("coinType", "")
-
-                    if wallet_address in owner and amt:
-                        direction = "IN" if int(amt) > 0 else "OUT"
-                        amount = f"{abs(int(amt)) / 1e9:.9f}"
-                        matched = True
-                        break
-
-        except Exception as e:
-            if DEBUG:
-                print(f"❌ Event/balance parse fail [{digest}]: {e}")
-                print(json.dumps(txn.get("events", []), indent=2))
-
-        row = [
-            ts_fmt,
-            wallet_address,
-            digest,
-            "SUI",
-            amount,
-            fee,
-            direction
-        ]
-        rows_to_append.append(row)
+            row = [
+                ts_fmt,
+                wallet_address,
+                digest,
+                token_symbol,
+                amount,
+                fee,
+                direction
+            ]
+            rows_to_append.append(row)
 
     time.sleep(0.5)
 
-# Append to sheet
+# === WRITE TO SHEET ===
 if rows_to_append:
     print(f"⬆️ Appending {len(rows_to_append)} new rows...")
     for row in reversed(rows_to_append):
