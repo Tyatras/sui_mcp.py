@@ -4,7 +4,7 @@ import requests
 from datetime import datetime
 import time
 
-DEBUG = True  # Turn off in production
+DEBUG = True  # Set to False in production
 
 # Setup Google Sheets
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -56,7 +56,7 @@ while has_next_page:
     has_next_page = result.get("hasNextPage", False)
 
     if DEBUG:
-        print(f"🧭 {len(txns)} transactions fetched | Next: {has_next_page}")
+        print(f"🧭 {len(txns)} transactions fetched | Next page: {has_next_page}")
 
     for txn in txns:
         digest = txn.get("digest")
@@ -73,7 +73,7 @@ while has_next_page:
             fee = f"{int(gas_used) / 1e9:.9f}"
         except Exception as e:
             if DEBUG:
-                print(f"⚠️ Gas parse fail [{digest}]: {e}")
+                print(f"⚠️ Fee parse failed [{digest}]: {e}")
 
         # === BALANCE CHANGES ===
         changes = txn.get("balanceChanges", [])
@@ -82,22 +82,21 @@ while has_next_page:
             coin_type = change.get("coinType", "")
             amount_raw = change.get("amount")
 
-            # Handle dict or direct owner value
+            # Handle owner field format (dict or string)
             if isinstance(owner, dict):
                 owner_str = list(owner.values())[0]
             else:
                 owner_str = owner
 
+            # DEBUG: Show balance change evaluation
             if DEBUG:
-                print(f"🔎 Checking change: owner={owner_str}, amount={amount_raw}, token={coin_type}")
+                print(f"🧩 digest={digest} | owner={owner_str} | wallet={wallet_address} | match={wallet_address in owner_str.lower()} | amt={amount_raw}")
 
-            if not (owner_str and owner_str.lower() == wallet_address and amount_raw):
+            # Match based on lowercase address presence
+            if not (owner_str and wallet_address in owner_str.lower() and amount_raw):
                 continue
 
-            # Extract token name
             token_symbol = "SUI" if coin_type.endswith("::sui::SUI") else coin_type.split("::")[-1]
-
-            # Direction + amount
             direction = "IN" if int(amount_raw) > 0 else "OUT"
             amount = f"{abs(int(amount_raw)) / 1e9:.9f}"
 
