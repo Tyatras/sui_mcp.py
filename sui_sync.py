@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 import json
 
-DEBUG = True  # Set to False to reduce logs
+DEBUG = True  # Set to False in production
 
 # Setup Google Sheets
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -17,15 +17,14 @@ config_ws = spreadsheet.worksheet("Config")
 output_ws = spreadsheet.worksheet("Transactions")
 wallet_address = config_ws.acell("B1").value.strip()
 
-existing_hashes = set(output_ws.col_values(3)[1:])  # Column C: Txn Hash
-
+existing_hashes = set(output_ws.col_values(3)[1:])  # Skip header
 rpc_url = "https://fullnode.mainnet.sui.io"
 cursor = None
 page_size = 50
 has_next_page = True
 rows_to_append = []
 
-print(f"🔍 Syncing transactions for: {wallet_address}")
+print(f"🔄 Syncing for wallet: {wallet_address}")
 
 while has_next_page:
     payload = {
@@ -58,14 +57,13 @@ while has_next_page:
     has_next_page = result.get("hasNextPage", False)
 
     if DEBUG:
-        print(f"🧭 Retrieved {len(txns)} txns | nextCursor: {cursor} | hasNext: {has_next_page}")
+        print(f"🧭 {len(txns)} transactions fetched | Next: {has_next_page}")
 
     for txn in txns:
         digest = txn.get("digest")
         if digest in existing_hashes:
             continue
 
-        # === TIMESTAMP ===
         timestamp = txn.get("timestampMs")
         ts_fmt = datetime.utcfromtimestamp(int(timestamp) / 1000).strftime("%Y-%m-%d %H:%M:%S") if timestamp else ""
 
@@ -77,19 +75,23 @@ while has_next_page:
             fee = f"{total_mist / 1e9:.9f}"
         except Exception as e:
             if DEBUG:
-                print(f"⚠️ Fee parse error [{digest}]: {e}")
+                print(f"⚠️ Gas parse fail [{digest}]: {e}")
 
-        # === AMOUNT + DIRECTION ===
+        # === AMOUNT & DIRECTION ===
         amount = ""
         direction = ""
+        matched = False
         try:
-            events = txn.get("events", [])
-            if DEBUG:
-                print(f"📦 {digest} has {len(events)} events")
+            for event in txn.get("events", []):
+                if "moveEvent" not in event:
+                    continue
 
-            for event in events:
-                if "moveEvent" in event:
-                    fields = event["moveEvent"].get("fields", {})
+                move = event["moveEvent"]
+                evt_type = move.get("type", "")
+                fields = move.get("fields", {})
+
+                # Match based on known token transfer types
+                if "Pay" in evt_type or "TransferObject" in evt_type:
                     amt_raw = fields.get("amount")
                     sender = fields.get("sender")
                     recipient = fields.get("recipient")
@@ -98,10 +100,26 @@ while has_next_page:
                         amount = f"{int(amt_raw) / 1e9:.9f}"
                     if sender and recipient:
                         direction = "OUT" if sender == wallet_address else "IN"
-                    break  # Stop after first successful parse
+                    matched = True
+                    break
+
+            if not matched:
+                if DEBUG:
+                    print(f"🔍 No matching moveEvent found for {digest}, checking balanceChanges")
+                for change in txn.get("balanceChanges", []):
+                    owner = change.get("owner", "")
+                    amt = change.get("amount")
+                    coinType = change.get("coinType", "")
+
+                    if wallet_address in owner and amt:
+                        direction = "IN" if int(amt) > 0 else "OUT"
+                        amount = f"{abs(int(amt)) / 1e9:.9f}"
+                        matched = True
+                        break
+
         except Exception as e:
             if DEBUG:
-                print(f"❌ Event parse fail [{digest}]: {e}")
+                print(f"❌ Event/balance parse fail [{digest}]: {e}")
                 print(json.dumps(txn.get("events", []), indent=2))
 
         row = [
@@ -115,9 +133,9 @@ while has_next_page:
         ]
         rows_to_append.append(row)
 
-    time.sleep(0.5)  # Respect rate limits
+    time.sleep(0.5)
 
-# === WRITE TO SHEET ===
+# Append to sheet
 if rows_to_append:
     print(f"⬆️ Appending {len(rows_to_append)} new rows...")
     for row in reversed(rows_to_append):
